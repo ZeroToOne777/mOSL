@@ -5,7 +5,6 @@
 #   Lockdown macOS Mojave security settings
 
 set -uo pipefail
-# -e exit if any command returns non-zero status code
 # -u prevent using undefined variables
 # -o pipefail force pipelines to fail on first non-zero status code
 
@@ -16,7 +15,8 @@ IFS=$'\n\t'
 
 ### Define Colours ###
 
-tput sgr0; # reset colors
+tput sgr0; 
+# reset colors
 
 readonly RED="$(tput setaf 1)"
 readonly RESET="$(tput sgr0)"
@@ -30,13 +30,19 @@ function usage {
   echo "Usage:"
   echo "  list         - List all settings that can be audited/ fixed"
   echo "  audit        - Audit the status of all settings (Does ${BOLD}NOT${RESET} change settings)"
-  echo "  ${RED}fix${RESET}          - Attempt to fix all settings (${BOLD}Does${RESET} change settings)"
+  echo "  ${RED}fix${RESET}  {force} - Attempt to fix all settings (${BOLD}Does${RESET} change settings)"
 
   exit 0
 }
 
 
 ### UTILITY FUNCTIONS ###
+# macos_compatability_check
+# audit
+# fix
+# mode_check
+# get_fix_mode_permission
+# verify_signature
 
 
 function macos_compatability_check {
@@ -68,22 +74,6 @@ function macos_compatability_check {
   if [ "${current_macos_version}" != "${supported_macos_version}" ]; then 
     echo "[❌] Lockdown was built for macOS ${supported_macos_name} (${supported_macos_version}.x)"
     echo "[🍺] This is macOS ${current_macos_name} (${current_macos_version})"
-    exit 1
-  fi
-}
-
-
-function bash_compatability_check {
-
-  # Check the system has at least Bash 4.x
-
-  local bash_version
-  bash_version="$(echo "${BASH_VERSION}" | awk -F '.' '{print $1}')"; 
-  
-  if [ "${bash_version}" -lt 4 ]; then 
-    echo "[❌] Sorry, this script requires Bash 4.x"
-    echo "[🍺] Current Bash version is ${BASH_VERSION}"
-    echo "[⬇️] brew install bash"
     exit 1
   fi
 }
@@ -163,6 +153,24 @@ function get_fix_mode_permission {
   else
     echo "[❌] ${USER} has chosen to quit"
     exit 1
+  fi
+}
+
+
+function verify_signature {
+  
+  # Verify Lockdown signature with minisign
+
+  if [ -x "$(command -v minisign)" ]; then
+
+    if ! minisign -Vm ./Lockdown -P "RWTiYbJbLl7q6uQ70l1XCvGExizUgEBNDPH0m/1yMimcsfgh542+RDPU" >/dev/null; then 
+      echo "[❌] Failed to validate Lockdown signature with minisign"
+      exit 1
+    fi
+
+  else
+    echo "[⚠️ ] Unable to verify Lockdown signature as minisign is not installed"
+    echo "[🍺] brew install minisign"
   fi
 }
 
@@ -317,7 +325,7 @@ function disable_mail_remote_content {
 
   audit_command="defaults read com.apple.mail-shared DisableURLLoading 2>/dev/null | grep -q '1'"
   
-  fix_command="defaults write com.apple.mail-shared DisableURLLoading -int '1'"
+  fix_command="defaults write com.apple.mail-shared DisableURLLoading -bool true"
 
   mode_check "${mode}" "${title}" "${audit_command}" "${fix_command}"
 }
@@ -436,8 +444,7 @@ function check_efi_integrity {
   audit_command="/usr/libexec/firmwarecheckers/eficheck/eficheck --integrity-check >/dev/null 2>&1"
   fix_command=''
 
-
-  if system_profiler SPiBridgeDataType | grep -q 'T2'; then 
+  if system_profiler SPiBridgeDataType | grep 'Model Name:' | grep -q 'T2'; then 
     echo "[⚠️ ] Check EFI Firmware Integrity ${RED}is not${RESET} supported by this Mac"
     return 1 
   fi
@@ -483,21 +490,20 @@ function check_firmware_password_set {
 
 function main {
 
+  verify_signature
+  # Verify Lockdown signature 
   macos_compatability_check
   # Check the system is running the supoorted version of macOS 
-  bash_compatability_check
-  # Check the system has at least Bash 4.x
 
   local cmd=${1:-"usage"}
   local settings=()
-  local all_functions
 
-  all_functions="$(grep "^function" "${0}")"
-  mapfile -t settings < <(echo "${all_functions}" \
-                      | awk '{print $2}' \
-                      | awk -v top=7 -v bottom=1 'NR<=top{next};NR>bottom+top{print line[NR%bottom]};{line[NR%bottom]=$0}')
-  # Build an array of all but the top 7 (utility functions) and bottom 1 (main) function names
-  # top NEEDS to be updated when new UTILITY functions are added
+  settings=(enable_automatic_updates enable_gatekeeper enable_firewall enable_admin_password_preferences \
+                  enable_terminal_secure_entry disable_firewall_builin_software disable_firewall_downloaded_signed\
+                  disable_ipv6 disable_mail_remote_content disable_remote_apple_events disable_remote_login \
+                  set_airdrop_contacts_only set_appstore_update_check_daily check_SIP check_kext_loading_consent \
+                  check_efi_integrity check_filevault check_firmware_password_set)
+
 
   if [[ "${cmd}" == "audit" ]]; then
 
@@ -510,8 +516,13 @@ function main {
 
   elif [[ "${cmd}" == "fix" ]]; then
 
-    # Confirm the user wants to run FIX mode
-    get_fix_mode_permission
+    local fix_force=${2:-"false"}
+
+    if [[ "${fix_force}" != "force" ]]; then
+      # Confirm the user wants to run FIX mode
+      # If "fix force" skip the prompt 
+      get_fix_mode_permission
+    fi
 
     for setting in "${settings[@]}"; do 
 
